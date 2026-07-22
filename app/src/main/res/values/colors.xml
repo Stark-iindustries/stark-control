@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="ios_bg">#FF1C1C1E</color>
+    <color name="ios_tile_off">#FF2C2C2E</color>
+    <color name="ios_tile_on">#FFFFFFFF</color>
+    <color name="ios_accent">#FF0A84FF</color>
+    <color name="ios_green">#FF30D158</color>
+    <color name="ios_orange">#FFFF9F0A</color>
+    <color name="ios_yellow">#FFFFD60A</color>
+    <color name="ios_separator">#FF3A3A3C</color>
+</resources>
