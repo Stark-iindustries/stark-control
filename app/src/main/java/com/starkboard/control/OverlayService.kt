@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
@@ -14,11 +15,13 @@ import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
 import com.starkboard.control.ui.ControlCenterView
 import com.starkboard.control.ui.StatusBarView
+import com.starkboard.control.ui.TriggerPillView
 
 class OverlayService : LifecycleService() {
 
     private lateinit var windowManager: WindowManager
     private var statusBarView: StatusBarView? = null
+    private var triggerPillView: TriggerPillView? = null
     private var controlCenterView: ControlCenterView? = null
     private var ccVisible = false
 
@@ -38,8 +41,17 @@ class OverlayService : LifecycleService() {
         super.onCreate()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         createNotificationChannel()
-        startForeground(NOTIF_ID, buildNotification())
+
+        // FIX: Android 14+ requires service type in startForeground()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(NOTIF_ID, buildNotification(),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        } else {
+            startForeground(NOTIF_ID, buildNotification())
+        }
+
         addStatusBarOverlay()
+        addTriggerPill()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -55,6 +67,7 @@ class OverlayService : LifecycleService() {
     override fun onDestroy() {
         super.onDestroy()
         removeStatusBar()
+        removeTriggerPill()
         hideControlCenter()
     }
 
@@ -71,6 +84,7 @@ class OverlayService : LifecycleService() {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or  // pass through touches — pill handles them
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
@@ -80,20 +94,6 @@ class OverlayService : LifecycleService() {
         }
 
         windowManager.addView(view, params)
-
-        // Swipe detector: down from status bar opens CC
-        val gd = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
-            override fun onFling(
-                e1: MotionEvent?, e2: MotionEvent,
-                velX: Float, velY: Float
-            ): Boolean {
-                if (velY > 600f) { showControlCenter(); return true }
-                return false
-            }
-            override fun onDown(e: MotionEvent) = true
-        })
-
-        view.setOnTouchListener { _, event -> gd.onTouchEvent(event) }
     }
 
     private fun removeStatusBar() {
@@ -103,9 +103,46 @@ class OverlayService : LifecycleService() {
         }
     }
 
+    // ── Trigger Pill (top-right, always visible, opens CC) ───────────
+    // FIX: Android 12+ intercepts swipe-from-top before tiny overlays receive it.
+    // A tappable/swipeable pill at the top-right corner is the reliable trigger.
+
+    private fun addTriggerPill() {
+        val sbh = getStatusBarHeight()
+        val pill = TriggerPillView(this) { showControlCenter() }
+        triggerPillView = pill
+
+        val pillW = dpToPx(56)
+        val pillH = dpToPx(36)
+
+        val params = WindowManager.LayoutParams(
+            pillW,
+            pillH,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = 0
+            y = sbh - pillH / 2   // sits half in status bar, half below — reachable
+        }
+
+        windowManager.addView(pill, params)
+    }
+
+    private fun removeTriggerPill() {
+        triggerPillView?.let {
+            try { windowManager.removeView(it) } catch (_: Exception) {}
+            triggerPillView = null
+        }
+    }
+
     // ── Control Center Overlay ────────────────────────────────────────
 
-    private fun showControlCenter() {
+    fun showControlCenter() {
         if (ccVisible) return
         ccVisible = true
 
@@ -125,7 +162,14 @@ class OverlayService : LifecycleService() {
         }
 
         windowManager.addView(cc, params)
-        cc.post { cc.animateIn() }
+        // FIX: wait for layout so height != 0 before animating
+        cc.viewTreeObserver.addOnGlobalLayoutListener(object :
+            ViewTreeObserver.OnGlobalLayoutListener {
+            override fun onGlobalLayout() {
+                cc.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                cc.animateIn()
+            }
+        })
     }
 
     fun hideControlCenter() {
@@ -134,7 +178,6 @@ class OverlayService : LifecycleService() {
             controlCenterView = null
         }
         ccVisible = false
-        // Refresh status bar icons after toggle changes
         statusBarView?.refreshNetwork()
     }
 
@@ -142,8 +185,11 @@ class OverlayService : LifecycleService() {
 
     private fun getStatusBarHeight(): Int {
         val resId = resources.getIdentifier("status_bar_height", "dimen", "android")
-        return if (resId > 0) resources.getDimensionPixelSize(resId) else 80
+        return if (resId > 0) resources.getDimensionPixelSize(resId) else dpToPx(44)
     }
+
+    private fun dpToPx(dp: Int): Int =
+        (dp * resources.displayMetrics.density + 0.5f).toInt()
 
     private fun createNotificationChannel() {
         val channel = NotificationChannel(
@@ -159,11 +205,6 @@ class OverlayService : LifecycleService() {
     }
 
     private fun buildNotification(): Notification {
-        val stopIntent = PendingIntent.getForegroundService(
-            this, 0,
-            Intent(this, OverlayService::class.java).apply { action = "STOP" },
-            PendingIntent.FLAG_IMMUTABLE
-        )
         val openIntent = PendingIntent.getActivity(
             this, 0,
             Intent(this, MainActivity::class.java),
