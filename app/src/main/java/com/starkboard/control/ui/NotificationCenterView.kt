@@ -47,9 +47,9 @@ class NotificationCenterView(
     init {
         val cv = ComposeView(context).apply {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
-            androidx.lifecycle.ViewTreeLifecycleOwner.set(this, lifecycleOwner)
+            this.setViewTreeLifecycleOwner(lifecycleOwner)
             if (lifecycleOwner is SavedStateRegistryOwner) {
-                androidx.savedstate.ViewTreeSavedStateRegistryOwner.set(this, lifecycleOwner)
+                this.setViewTreeSavedStateRegistryOwner(lifecycleOwner)
             }
             setContent {
                 MaterialTheme(colorScheme = darkColorScheme()) {
@@ -190,7 +190,7 @@ private fun NotificationCenterContent(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     DockButton(
-                        icon = Icons.Rounded.Flashlight,
+                        icon = Icons.Rounded.FlashlightOn,
                         active = flashOn,
                         tint = if (flashOn) Color.White else Color(0xFFAEAEB2)
                     ) {

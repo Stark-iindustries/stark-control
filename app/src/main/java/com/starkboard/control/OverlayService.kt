@@ -129,14 +129,26 @@ class OverlayService : LifecycleService(), SavedStateRegistryOwner {
             onRightSwipe = { openControlCenter() }
         ).also { statusBarView = it }
 
-        wm.addView(v, WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT, sbHeight(),
+        val lp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            sbHeight(),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS,
             PixelFormat.OPAQUE
-        ).apply { gravity = Gravity.TOP or Gravity.START })
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 0
+            y = 0
+            // Cover the display cutout/notch area on Android P+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+        wm.addView(v, lp)
     }
 
     // ── Dynamic Island ────────────────────────────────────────────────
@@ -149,30 +161,46 @@ class OverlayService : LifecycleService(), SavedStateRegistryOwner {
             pillW, sbHeight(),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START; x = (sw - pillW) / 2; y = 0 })
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = (sw - pillW) / 2
+            y = 0
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        })
     }
 
     // ── Edge Gestures ─────────────────────────────────────────────────
 
     private fun addEdgeGestures() {
-        val sbH = sbHeight()
-        val sw = screenW()
-        val stripW = dp(52)
-        val stripH = dp(200)
+        // Edge gesture strips extend FROM the top of screen (y=0) covering the
+        // status bar + a generous area below, so swipe-down always registers.
+        // Width is intentionally narrow so normal app touches pass through.
+        val stripW = dp(56)
+        val stripH = sbHeight() + dp(160)   // status bar + reach area
 
         leftEdge = EdgeGestureView(this) { openNotificationCenter() }.also { v ->
             wm.addView(v, WindowManager.LayoutParams(
                 stripW, stripH,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT
-            ).apply { gravity = Gravity.TOP or Gravity.START; x = 0; y = sbH })
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                x = 0; y = 0
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)
+                    layoutInDisplayCutoutMode =
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            })
         }
 
         rightEdge = EdgeGestureView(this) { openControlCenter() }.also { v ->
@@ -180,10 +208,17 @@ class OverlayService : LifecycleService(), SavedStateRegistryOwner {
                 stripW, stripH,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT
-            ).apply { gravity = Gravity.TOP or Gravity.END; x = 0; y = sbH })
+            ).apply {
+                gravity = Gravity.TOP or Gravity.END
+                x = 0; y = 0
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)
+                    layoutInDisplayCutoutMode =
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            })
         }
     }
 

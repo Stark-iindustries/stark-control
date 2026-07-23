@@ -46,10 +46,9 @@ class ControlCenterView(
     init {
         val cv = ComposeView(context).apply {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
-            androidx.lifecycle.ViewTreeLifecycleOwner.set(this, lifecycleOwner)
+            this.setViewTreeLifecycleOwner(lifecycleOwner)
             if (lifecycleOwner is SavedStateRegistryOwner) {
-                androidx.savedstate.findViewTreeSavedStateRegistryOwner(this)
-                    ?: androidx.savedstate.ViewTreeSavedStateRegistryOwner.set(this, lifecycleOwner)
+                this.setViewTreeSavedStateRegistryOwner(lifecycleOwner)
             }
             setContent {
                 MaterialTheme(colorScheme = darkColorScheme()) {
@@ -192,7 +191,7 @@ private fun ControlCenterContent(context: Context, onClose: () -> Unit) {
 
                     MediumTile(
                         modifier = Modifier.weight(1f),
-                        icon = Icons.Rounded.Flashlight,
+                        icon = Icons.Rounded.FlashlightOn,
                         label = "Torch",
                         active = flashOn,
                         activeColor = Color.White
@@ -421,7 +420,7 @@ private fun PhoneTiles(context: Context, flashOn: Boolean, onFlash: () -> Unit) 
     // Map phone tiles to icons
     tiles.forEach { t ->
         when {
-            t.contains("flashlight", true) -> shown.add("Torch" to Icons.Rounded.Flashlight)
+            t.contains("flashlight", true) -> shown.add("Torch" to Icons.Rounded.FlashlightOn)
             t.contains("calculator", true) -> shown.add("Calc" to Icons.Rounded.Calculate)
             t.contains("camera", true)     -> shown.add("Camera" to Icons.Rounded.CameraAlt)
             t.contains("record", true)     -> shown.add("Record" to Icons.Rounded.FiberSmartRecord)
@@ -435,7 +434,7 @@ private fun PhoneTiles(context: Context, flashOn: Boolean, onFlash: () -> Unit) 
     }
     // Always show at least these if list is short
     if (shown.size < 4) {
-        if (shown.none { it.first == "Torch" })   shown.add("Torch" to Icons.Rounded.Flashlight)
+        if (shown.none { it.first == "Torch" })   shown.add("Torch" to Icons.Rounded.FlashlightOn)
         if (shown.none { it.first == "Camera" })  shown.add("Camera" to Icons.Rounded.CameraAlt)
         if (shown.none { it.first == "Hotspot" }) shown.add("Hotspot" to Icons.Rounded.WifiTethering)
         if (shown.none { it.first == "Alarm" })   shown.add("Alarm" to Icons.Rounded.Alarm)
