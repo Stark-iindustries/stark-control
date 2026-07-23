@@ -1,44 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Overlay permission -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
-
-    <!-- WiFi -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
-
-    <!-- Bluetooth -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"/>
-
-    <!-- Mobile Data (aggressive - all variants) -->
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.MODIFY_PHONE_STATE"/>
     <uses-permission android:name="android.permission.READ_PHONE_STATE"/>
-
-    <!-- System Settings (Airplane Mode, Brightness) -->
     <uses-permission android:name="android.permission.WRITE_SETTINGS"/>
-
-    <!-- Do Not Disturb -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"/>
+    <uses-permission android:name="android.permission.EXPAND_STATUS_BAR"/>
     <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY"/>
-
-    <!-- Flashlight -->
     <uses-permission android:name="android.permission.CAMERA"/>
-
-    <!-- Screen Rotation -->
     <uses-permission android:name="android.permission.SET_ORIENTATION"/>
-
-    <!-- Service lifecycle -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
-
-    <!-- Volume -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 
     <application
         android:label="@string/app_name"
@@ -65,6 +49,16 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="overlay"/>
+        </service>
+
+        <service
+            android:name=".StarkNotificationListenerService"
+            android:label="Stark Control Notifications"
+            android:exported="true"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService"/>
+            </intent-filter>
         </service>
 
         <receiver
