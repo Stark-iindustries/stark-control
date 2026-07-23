@@ -1,462 +1,489 @@
 package com.starkboard.control.ui
 
-import android.animation.ValueAnimator
-import android.app.NotificationManager
 import android.content.Context
-import android.graphics.*
 import android.media.AudioManager
-import android.net.wifi.WifiManager
+import android.os.Build
 import android.provider.Settings
-import android.view.*
 import android.view.animation.DecelerateInterpolator
+import android.view.animation.OvershootInterpolator
 import android.widget.FrameLayout
+import androidx.compose.animation.*
+import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.*
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.rounded.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.*
+import androidx.compose.ui.draw.*
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.*
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.*
+import androidx.lifecycle.*
+import androidx.savedstate.SavedStateRegistryOwner
 import com.starkboard.control.toggles.*
+import java.text.SimpleDateFormat
+import java.util.*
+import kotlin.math.roundToInt
 
-class ControlCenterView(context: Context, private val onDismiss: () -> Unit) : FrameLayout(context) {
+class ControlCenterView(
+    context: Context,
+    private val lifecycleOwner: LifecycleOwner,
+    private val onClose: () -> Unit
+) : FrameLayout(context) {
 
-    // ── Colors ─────────────────────────────────────────────────────────
-    private val BG_COLOR = Color.parseColor("#E01C1C1E")
-    private val TILE_OFF = Color.parseColor("#FF2C2C2E")
-    private val TILE_ON = Color.parseColor("#FFFFFFFF")
-    private val TILE_ACCENT_ON = Color.parseColor("#FF1C74E8")   // iOS blue
-    private val TEXT_OFF = Color.parseColor("#FFFFFFFF")
-    private val TEXT_ON = Color.parseColor("#FF000000")
-    private val TEXT_ON_ACCENT = Color.parseColor("#FFFFFFFF")
-    private val SLIDER_BG = Color.parseColor("#FF3A3A3C")
-    private val SLIDER_FG = Color.parseColor("#FFFFFFFF")
-
-    // ── Paints ─────────────────────────────────────────────────────────
-    private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = BG_COLOR }
-    private val tilePaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        textAlign = Paint.Align.CENTER
-        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-    }
-    private val sliderBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = SLIDER_BG }
-    private val sliderFgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = SLIDER_FG }
-    private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-
-    // ── State ──────────────────────────────────────────────────────────
-    private var wifiOn = false
-    private var dataOn = false
-    private var btOn = false
-    private var airplaneOn = false
-    private var flashOn = false
-    private var rotLocked = false
-    private var dndOn = false
-    private var brightness = 0.5f
-    private var volume = 0.5f
-
-    // ── Gesture ────────────────────────────────────────────────────────
-    private var touchTileIndex = -1
-    private var touchDown = PointF()
-    private var translationY_ = 0f
-
-    // ── Layout ─────────────────────────────────────────────────────────
-    // Calculated in onLayout
-    private var panelLeft = 0f
-    private var panelTop = 0f
-    private var panelRight = 0f
-    private var panelBottom = 0f
-    private var panelRadius = 0f
-    private val tiles = mutableListOf<TileInfo>()
-    private var brightRect = RectF()
-    private var volRect = RectF()
-    private var draggingBrightness = false
-    private var draggingVolume = false
-
-    data class TileInfo(
-        val index: Int,
-        val rect: RectF,
-        val label: String,
-        var isOn: Boolean,
-        var useAccent: Boolean = false
-    )
+    private var translateY = -3000f
 
     init {
-        setWillNotDraw(false)
-        setBackgroundColor(Color.TRANSPARENT)
-        refreshState()
-    }
-
-    fun refreshState() {
-        wifiOn = try {
-            val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            wm.isWifiEnabled
-        } catch (e: Exception) { false }
-        dataOn = MobileDataToggle.isEnabled(context)
-        btOn = BluetoothToggle.isEnabled(context)
-        airplaneOn = AirplaneModeToggle.isEnabled(context)
-        flashOn = FlashlightToggle.isEnabled()
-        rotLocked = RotationToggle.isLocked(context)
-        dndOn = DndToggle.isEnabled(context)
-
-        // Brightness
-        brightness = try {
-            val b = Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS, 128)
-            b / 255f
-        } catch (e: Exception) { 0.5f }
-
-        // Volume
-        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        volume = am.getStreamVolume(AudioManager.STREAM_MUSIC) / max.toFloat()
-
-        invalidate()
-    }
-
-    override fun onSizeChanged(w: Int, h: Int, oldW: Int, oldH: Int) {
-        super.onSizeChanged(w, h, oldW, oldH)
-        buildLayout(w.toFloat(), h.toFloat())
-    }
-
-    private fun buildLayout(w: Float, h: Float) {
-        val margin = w * 0.04f
-        val panelW = w - margin * 2f
-        panelRadius = 32f
-
-        // Panel floats about 1/3 from top
-        panelLeft = margin
-        panelRight = w - margin
-        panelTop = h * 0.02f
-        panelBottom = h * 0.68f
-
-        val innerL = panelLeft + 18f
-        val innerR = panelRight - 18f
-        val innerT = panelTop + 22f
-
-        val gap = 12f
-
-        // ── Big 2x2 connectivity block ──────────────────────────────
-        val bigBlockW = (innerR - innerL) * 0.52f
-        val bigTileW = (bigBlockW - gap) / 2f
-        val bigTileH = bigTileW
-
-        tiles.clear()
-        // WiFi
-        tiles.add(TileInfo(0, RectF(innerL, innerT, innerL + bigTileW, innerT + bigTileH), "Wi-Fi", wifiOn))
-        // Cellular
-        tiles.add(TileInfo(1, RectF(innerL + bigTileW + gap, innerT, innerL + bigBlockW, innerT + bigTileH), "Cellular", dataOn, useAccent = false))
-        // Bluetooth
-        tiles.add(TileInfo(2, RectF(innerL, innerT + bigTileH + gap, innerL + bigTileW, innerT + bigTileH * 2 + gap), "Bluetooth", btOn))
-        // Airplane
-        tiles.add(TileInfo(3, RectF(innerL + bigTileW + gap, innerT + bigTileH + gap, innerL + bigBlockW, innerT + bigTileH * 2 + gap), "Airplane", airplaneOn))
-
-        // ── Small tiles column ──────────────────────────────────────
-        val smallX = innerL + bigBlockW + gap
-        val smallW = innerR - smallX
-        val bigBlock2H = bigTileH * 2 + gap
-        val smallTileH = (bigBlock2H - gap * 2) / 3f
-        // Flashlight
-        tiles.add(TileInfo(4, RectF(smallX, innerT, innerR, innerT + smallTileH), "Flash", flashOn))
-        // Rotation Lock
-        tiles.add(TileInfo(5, RectF(smallX, innerT + smallTileH + gap, innerR, innerT + smallTileH * 2 + gap), "Rotate", rotLocked))
-        // DND
-        tiles.add(TileInfo(6, RectF(smallX, innerT + (smallTileH + gap) * 2, innerR, innerT + bigBlock2H), "Focus", dndOn))
-
-        val sliderT = innerT + bigTileH * 2 + gap + 18f
-        val sliderH = 52f
-
-        // Brightness slider
-        brightRect = RectF(innerL, sliderT, innerR, sliderT + sliderH)
-        // Volume slider
-        volRect = RectF(innerL, sliderT + sliderH + gap, innerR, sliderT + sliderH * 2 + gap)
-
-        panelBottom = volRect.bottom + 22f
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        // Dim scrim
-        canvas.drawColor(Color.argb(160, 0, 0, 0))
-
-        // Panel background
-        val panelRect = RectF(panelLeft, panelTop + translationY_, panelRight, panelBottom + translationY_)
-        canvas.drawRoundRect(panelRect, panelRadius, panelRadius, bgPaint)
-
-        val dy = translationY_
-
-        // Tiles
-        for (tile in tiles) {
-            val r = RectF(tile.rect).apply { offset(0f, dy) }
-            drawTile(canvas, r, tile)
-        }
-
-        // Sliders
-        drawSlider(canvas, RectF(brightRect).apply { offset(0f, dy) }, brightness, "Brightness", isBrightness = true)
-        drawSlider(canvas, RectF(volRect).apply { offset(0f, dy) }, volume, "Volume", isBrightness = false)
-    }
-
-    private fun drawTile(canvas: Canvas, r: RectF, tile: TileInfo) {
-        // Background
-        val bgColor = when {
-            tile.isOn && tile.useAccent -> TILE_ACCENT_ON
-            tile.isOn -> TILE_ON
-            else -> TILE_OFF
-        }
-        tilePaint.color = bgColor
-        canvas.drawRoundRect(r, 20f, 20f, tilePaint)
-
-        // Icon
-        val cx = r.centerX()
-        val cy = r.centerY() - 8f
-        val iconColor = when {
-            tile.isOn && tile.useAccent -> TEXT_ON_ACCENT
-            tile.isOn -> TEXT_ON
-            else -> TEXT_OFF
-        }
-        iconPaint.color = iconColor
-        drawTileIcon(canvas, tile.index, tile.isOn, cx, cy, r.width() * 0.22f)
-
-        // Label
-        textPaint.color = iconColor
-        textPaint.textSize = r.height() * 0.16f
-        canvas.drawText(tile.label, r.centerX(), r.bottom - r.height() * 0.12f, textPaint)
-    }
-
-    private fun drawTileIcon(canvas: Canvas, index: Int, on: Boolean, cx: Float, cy: Float, size: Float) {
-        val p = Paint(iconPaint).apply { strokeWidth = size * 0.15f; style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
-        val fp = Paint(iconPaint).apply { style = Paint.Style.FILL }
-        when (index) {
-            0 -> { // WiFi arcs
-                for (i in 0..2) {
-                    val r = size * 0.35f + i * size * 0.3f
-                    val arc = RectF(cx - r, cy - r, cx + r, cy + r)
-                    p.alpha = if (on) 255 else 160
-                    canvas.drawArc(arc, 210f, 120f, false, p)
-                }
-                canvas.drawCircle(cx, cy + size * 0.35f, size * 0.12f, fp)
+        val cv = ComposeView(context).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+            androidx.lifecycle.ViewTreeLifecycleOwner.set(this, lifecycleOwner)
+            if (lifecycleOwner is SavedStateRegistryOwner) {
+                androidx.savedstate.findViewTreeSavedStateRegistryOwner(this)
+                    ?: androidx.savedstate.ViewTreeSavedStateRegistryOwner.set(this, lifecycleOwner)
             }
-            1 -> { // Cell bars
-                val barCount = 4
-                val totalW = size * 0.9f
-                val bw = totalW / (barCount * 2 - 1)
-                val startX = cx - totalW / 2f
-                val bottom = cy + size * 0.4f
-                for (i in 0 until barCount) {
-                    val bh = size * 0.2f + i * size * 0.15f
-                    val bx = startX + i * bw * 2
-                    fp.alpha = if (on) 255 else 160
-                    canvas.drawRoundRect(RectF(bx, bottom - bh, bx + bw, bottom), 2f, 2f, fp)
+            setContent {
+                MaterialTheme(colorScheme = darkColorScheme()) {
+                    ControlCenterContent(context, onClose)
                 }
             }
-            2 -> { // Bluetooth B shape
-                val bPath = Path().apply {
-                    moveTo(cx - size * 0.15f, cy - size * 0.45f)
-                    lineTo(cx + size * 0.2f, cy - size * 0.2f)
-                    lineTo(cx - size * 0.1f, cy)
-                    lineTo(cx + size * 0.2f, cy + size * 0.2f)
-                    lineTo(cx - size * 0.15f, cy + size * 0.45f)
-                    moveTo(cx - size * 0.15f, cy)
-                    lineTo(cx + size * 0.2f, cy)
-                }
-                canvas.drawPath(bPath, p)
-            }
-            3 -> { // Airplane
-                val aPath = Path().apply {
-                    moveTo(cx, cy - size * 0.5f)
-                    lineTo(cx + size * 0.5f, cy + size * 0.2f)
-                    lineTo(cx, cy)
-                    lineTo(cx - size * 0.5f, cy + size * 0.2f)
-                    close()
-                    moveTo(cx - size * 0.25f, cy + size * 0.3f)
-                    lineTo(cx + size * 0.25f, cy + size * 0.3f)
-                }
-                canvas.drawPath(aPath, fp)
-            }
-            4 -> { // Flashlight
-                canvas.drawRoundRect(RectF(cx - size*0.15f, cy - size*0.5f, cx + size*0.15f, cy + size*0.35f), 6f, 6f, fp)
-                canvas.drawRoundRect(RectF(cx - size*0.25f, cy + size*0.25f, cx + size*0.25f, cy + size*0.5f), 4f, 4f, fp)
-            }
-            5 -> { // Rotation lock
-                val circRect = RectF(cx - size*0.4f, cy - size*0.4f, cx + size*0.4f, cy + size*0.4f)
-                canvas.drawArc(circRect, 30f, 270f, false, p)
-                // Arrow head
-                canvas.drawCircle(cx + size*0.4f, cy - size*0.05f, size*0.12f, fp)
-                // Lock
-                canvas.drawRoundRect(RectF(cx - size*0.15f, cy - size*0.1f, cx + size*0.15f, cy + size*0.2f), 4f, 4f, fp)
-            }
-            6 -> { // Moon (DND)
-                val moonPath = Path().apply {
-                    addArc(RectF(cx - size*0.4f, cy - size*0.45f, cx + size*0.4f, cy + size*0.45f), 40f, 280f)
-                    lineTo(cx, cy - size*0.45f)
-                    addArc(RectF(cx - size*0.15f, cy - size*0.35f, cx + size*0.3f, cy + size*0.15f), 320f, -230f)
-                    close()
-                }
-                canvas.drawPath(moonPath, fp)
-            }
         }
-    }
-
-    private fun drawSlider(canvas: Canvas, r: RectF, value: Float, label: String, isBrightness: Boolean) {
-        // Track
-        canvas.drawRoundRect(r, r.height() / 2f, r.height() / 2f, sliderBgPaint)
-        // Fill
-        val fillW = r.width() * value.coerceIn(0f, 1f)
-        val fillRect = RectF(r.left, r.top, r.left + fillW, r.bottom)
-        canvas.drawRoundRect(fillRect, r.height() / 2f, r.height() / 2f, sliderFgPaint)
-        // Icon + label
-        val iconP = Paint(iconPaint).apply { color = if (value > 0.15f) Color.BLACK else Color.WHITE; style = Paint.Style.FILL }
-        val cx = r.left + r.height() / 2f
-        val cy = r.centerY()
-        val iSize = r.height() * 0.3f
-        if (isBrightness) {
-            // Sun icon
-            canvas.drawCircle(cx, cy, iSize * 0.5f, iconP)
-        } else {
-            // Speaker icon
-            val sp = Path().apply {
-                moveTo(cx - iSize * 0.5f, cy - iSize * 0.4f)
-                lineTo(cx, cy - iSize * 0.4f)
-                lineTo(cx + iSize * 0.5f, cy - iSize * 0.8f)
-                lineTo(cx + iSize * 0.5f, cy + iSize * 0.8f)
-                lineTo(cx, cy + iSize * 0.4f)
-                lineTo(cx - iSize * 0.5f, cy + iSize * 0.4f)
-                close()
-            }
-            canvas.drawPath(sp, iconP)
-        }
-    }
-
-    override fun onTouchEvent(event: MotionEvent): Boolean {
-        when (event.action) {
-            MotionEvent.ACTION_DOWN -> {
-                touchDown.set(event.x, event.y)
-                touchTileIndex = hitTile(event.x, event.y - translationY_)
-                draggingBrightness = hitRect(event.x, event.y - translationY_, brightRect)
-                draggingVolume = hitRect(event.x, event.y - translationY_, volRect)
-                return true
-            }
-            MotionEvent.ACTION_MOVE -> {
-                val dy = event.y - touchDown.y
-                if (draggingBrightness) {
-                    val pct = (event.x - brightRect.left) / brightRect.width()
-                    brightness = pct.coerceIn(0f, 1f)
-                    applyBrightness()
-                    invalidate()
-                    return true
-                }
-                if (draggingVolume) {
-                    val pct = (event.x - volRect.left) / volRect.width()
-                    volume = pct.coerceIn(0f, 1f)
-                    applyVolume()
-                    invalidate()
-                    return true
-                }
-                if (!draggingBrightness && !draggingVolume && dy > 40f) {
-                    translationY_ = (dy - 40f).coerceAtMost(height * 0.3f)
-                    invalidate()
-                }
-                return true
-            }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                val dy = event.y - touchDown.y
-                if (!draggingBrightness && !draggingVolume) {
-                    if (dy > height * 0.15f) {
-                        animateDismiss()
-                    } else {
-                        // Check tap on tile
-                        val tileIdx = hitTile(event.x, event.y - translationY_)
-                        if (tileIdx >= 0 && kotlin.math.abs(dy) < 20f) {
-                            handleTileTap(tileIdx)
-                        } else if (tileIdx < 0 && !hitPanel(event.x, event.y)) {
-                            animateDismiss()
-                        } else {
-                            snapBack()
-                        }
-                    }
-                }
-                draggingBrightness = false
-                draggingVolume = false
-                return true
-            }
-        }
-        return super.onTouchEvent(event)
-    }
-
-    private fun hitRect(x: Float, y: Float, r: RectF): Boolean = r.contains(x, y)
-
-    private fun hitPanel(x: Float, y: Float): Boolean =
-        x >= panelLeft && x <= panelRight && y >= panelTop && y <= panelBottom
-
-    private fun hitTile(x: Float, y: Float): Int {
-        for (tile in tiles) {
-            if (tile.rect.contains(x, y)) return tile.index
-        }
-        return -1
-    }
-
-    private fun handleTileTap(index: Int) {
-        when (index) {
-            0 -> { WifiToggle.toggle(context); wifiOn = WifiToggle.isEnabled(context) }
-            1 -> { MobileDataToggle.toggle(context); dataOn = MobileDataToggle.isEnabled(context) }
-            2 -> { BluetoothToggle.toggle(context); btOn = BluetoothToggle.isEnabled(context) }
-            3 -> { AirplaneModeToggle.toggle(context); airplaneOn = AirplaneModeToggle.isEnabled(context) }
-            4 -> { FlashlightToggle.toggle(context); flashOn = FlashlightToggle.isEnabled() }
-            5 -> { RotationToggle.toggle(context); rotLocked = RotationToggle.isLocked(context) }
-            6 -> { DndToggle.toggle(context); dndOn = DndToggle.isEnabled(context) }
-        }
-        tiles.find { it.index == index }?.isOn = when (index) {
-            0 -> wifiOn; 1 -> dataOn; 2 -> btOn; 3 -> airplaneOn
-            4 -> flashOn; 5 -> rotLocked; 6 -> dndOn; else -> false
-        }
-        invalidate()
-    }
-
-    private fun applyBrightness() {
-        try {
-            val b = (brightness * 255).toInt().coerceIn(1, 255)
-            Settings.System.putInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS, b)
-        } catch (e: Exception) { /* needs WRITE_SETTINGS */ }
-    }
-
-    private fun applyVolume() {
-        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        am.setStreamVolume(AudioManager.STREAM_MUSIC, (volume * max).toInt(), 0)
-    }
-
-    private fun animateDismiss() {
-        val start = translationY_
-        val end = height.toFloat()
-        ValueAnimator.ofFloat(start, end).apply {
-            duration = 280
-            interpolator = DecelerateInterpolator()
-            addUpdateListener {
-                translationY_ = it.animatedValue as Float
-                invalidate()
-            }
-            addListener(object : android.animation.AnimatorListenerAdapter() {
-                override fun onAnimationEnd(a: android.animation.Animator) {
-                    onDismiss()
-                }
-            })
-            start()
-        }
-    }
-
-    private fun snapBack() {
-        ValueAnimator.ofFloat(translationY_, 0f).apply {
-            duration = 200
-            interpolator = DecelerateInterpolator()
-            addUpdateListener {
-                translationY_ = it.animatedValue as Float
-                invalidate()
-            }
-            start()
-        }
+        addView(cv)
+        translationY = translateY
     }
 
     fun animateIn() {
-        translationY_ = -height.toFloat() * 0.5f
-        ValueAnimator.ofFloat(translationY_, 0f).apply {
-            duration = 320
-            interpolator = DecelerateInterpolator(1.5f)
-            addUpdateListener {
-                translationY_ = it.animatedValue as Float
-                invalidate()
+        animate()
+            .translationY(0f)
+            .setDuration(460)
+            .setInterpolator(OvershootInterpolator(0.6f))
+            .start()
+    }
+
+    fun animateOut(onEnd: () -> Unit) {
+        animate()
+            .translationY(-height.toFloat().coerceAtLeast(2000f))
+            .setDuration(320)
+            .setInterpolator(DecelerateInterpolator(2f))
+            .withEndAction(onEnd)
+            .start()
+    }
+}
+
+@Composable
+private fun ControlCenterContent(context: Context, onClose: () -> Unit) {
+    val sbHeight = remember {
+        val id = context.resources.getIdentifier("status_bar_height", "dimen", "android")
+        if (id > 0) (context.resources.getDimensionPixelSize(id) / context.resources.displayMetrics.density).dp
+        else 28.dp
+    }
+
+    // State for toggles
+    var wifiOn by remember { mutableStateOf(WifiToggle.isEnabled(context)) }
+    var btOn by remember { mutableStateOf(BluetoothToggle.isEnabled(context)) }
+    var airplaneOn by remember { mutableStateOf(AirplaneModeToggle.isEnabled(context)) }
+    var dataOn by remember { mutableStateOf(MobileDataToggle.isEnabled(context)) }
+    var dndOn by remember { mutableStateOf(DndToggle.isEnabled(context)) }
+    var rotationLocked by remember { mutableStateOf(RotationToggle.isLocked(context)) }
+    var flashOn by remember { mutableStateOf(false) }
+
+    val audio = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
+    var brightness by remember {
+        mutableFloatStateOf(
+            try { Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS, 128) / 255f }
+            catch (_: Exception) { 0.5f }
+        )
+    }
+    var volume by remember {
+        mutableFloatStateOf(
+            audio.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() /
+            audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).toFloat()
+        )
+    }
+
+    // Drag-to-dismiss
+    var offsetY by remember { mutableFloatStateOf(0f) }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                detectTapGestures { onClose() }
             }
-            start()
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .wrapContentHeight()
+                .offset { IntOffset(0, offsetY.roundToInt()) }
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color(0xFF000000), Color(0xEE111111))
+                    ),
+                    RoundedCornerShape(bottomStart = 28.dp, bottomEnd = 28.dp)
+                )
+                .pointerInput(Unit) {
+                    detectVerticalDragGestures(
+                        onDragEnd = {
+                            if (offsetY < -80) onClose()
+                            else offsetY = 0f
+                        }
+                    ) { _, dy ->
+                        if (dy < 0) offsetY = (offsetY + dy).coerceIn(-300f, 0f)
+                    }
+                }
+                .pointerInput(Unit) {
+                    detectTapGestures { /* consume — don't close */ }
+                }
+        ) {
+            Column(
+                Modifier.padding(
+                    start = 16.dp, end = 16.dp,
+                    top = sbHeight + 8.dp, bottom = 20.dp
+                )
+            ) {
+                // ── Row 1: Connectivity + Music ───────────────────────
+                Row(Modifier.fillMaxWidth().height(136.dp)) {
+                    // Connectivity 2×2 cluster
+                    ConnectivityCluster(
+                        modifier = Modifier.weight(0.56f).fillMaxHeight(),
+                        wifiOn = wifiOn, btOn = btOn,
+                        airplaneOn = airplaneOn, dataOn = dataOn,
+                        onWifi = { wifiOn = !wifiOn; WifiToggle.toggle(context) },
+                        onBt = { btOn = !btOn; BluetoothToggle.toggle(context) },
+                        onAirplane = { airplaneOn = !airplaneOn; AirplaneModeToggle.toggle(context) },
+                        onData = { dataOn = !dataOn; MobileDataToggle.toggle(context) }
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    // Music player card
+                    MusicCard(
+                        modifier = Modifier.weight(0.44f).fillMaxHeight(),
+                        audio = audio
+                    )
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                // ── Row 2: 4 medium tiles ─────────────────────────────
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    MediumTile(
+                        modifier = Modifier.weight(1f),
+                        icon = Icons.Rounded.ScreenRotation,
+                        label = if (rotationLocked) "Portrait" else "Rotation",
+                        active = rotationLocked,
+                        activeColor = Color(0xFFFF9F0A)
+                    ) { rotationLocked = !rotationLocked; RotationToggle.toggle(context) }
+
+                    MediumTile(
+                        modifier = Modifier.weight(1f),
+                        icon = Icons.Rounded.CastConnected,
+                        label = "Mirror",
+                        active = false
+                    ) {}
+
+                    MediumTile(
+                        modifier = Modifier.weight(1f),
+                        icon = Icons.Rounded.Flashlight,
+                        label = "Torch",
+                        active = flashOn,
+                        activeColor = Color.White
+                    ) { flashOn = !flashOn; FlashlightToggle.toggle(context) }
+
+                    MediumTile(
+                        modifier = Modifier.weight(1f),
+                        icon = Icons.Rounded.Timer,
+                        label = "Timer",
+                        active = false
+                    ) {}
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                // ── Row 3: Focus pill + Brightness + Volume ───────────
+                // Focus / DND
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(52.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(if (dndOn) Color(0xFF2C2C2E) else Color(0xFF1C1C1E))
+                        .clickable { dndOn = !dndOn; DndToggle.toggle(context) }
+                        .padding(horizontal = 18.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Rounded.DarkMode,
+                        contentDescription = null,
+                        tint = if (dndOn) Color(0xFF5E5CE6) else Color.White,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        "Focus",
+                        color = Color.White,
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 16.sp
+                    )
+                }
+
+                Spacer(Modifier.height(10.dp))
+
+                // Brightness
+                IosSlider(
+                    value = brightness,
+                    icon = Icons.Rounded.BrightnessHigh,
+                    onValueChange = { v ->
+                        brightness = v
+                        try {
+                            Settings.System.putInt(
+                                context.contentResolver,
+                                Settings.System.SCREEN_BRIGHTNESS,
+                                (v * 255).toInt()
+                            )
+                        } catch (_: Exception) {}
+                    }
+                )
+
+                Spacer(Modifier.height(10.dp))
+
+                // Volume
+                IosSlider(
+                    value = volume,
+                    icon = Icons.Rounded.VolumeUp,
+                    onValueChange = { v ->
+                        volume = v
+                        audio.setStreamVolume(
+                            AudioManager.STREAM_MUSIC,
+                            (v * audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)).toInt(),
+                            0
+                        )
+                    }
+                )
+
+                Spacer(Modifier.height(14.dp))
+
+                // ── Bottom tile grid (phone's actual QS tiles) ────────
+                PhoneTiles(context = context, flashOn = flashOn,
+                    onFlash = { flashOn = !flashOn; FlashlightToggle.toggle(context) })
+            }
         }
+    }
+}
+
+@Composable
+private fun ConnectivityCluster(
+    modifier: Modifier,
+    wifiOn: Boolean, btOn: Boolean, airplaneOn: Boolean, dataOn: Boolean,
+    onWifi: () -> Unit, onBt: () -> Unit, onAirplane: () -> Unit, onData: () -> Unit
+) {
+    Surface(
+        modifier = modifier,
+        color = Color(0xFF1C1C1E),
+        shape = RoundedCornerShape(20.dp)
+    ) {
+        Column(Modifier.padding(10.dp)) {
+            Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ConnTile(Modifier.weight(1f), Icons.Rounded.AirplanemodeActive, "Airplane", airplaneOn, onAirplane)
+                ConnTile(Modifier.weight(1f), Icons.Rounded.Wifi, "WiFi", wifiOn, onWifi)
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ConnTile(Modifier.weight(1f), Icons.Rounded.Bluetooth, "BT", btOn, onBt)
+                ConnTile(Modifier.weight(1f), Icons.Rounded.SignalCellularAlt, "Data", dataOn, onData)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ConnTile(modifier: Modifier, icon: ImageVector, label: String, active: Boolean, onClick: () -> Unit) {
+    val bg = if (active) Color(0xFF0A84FF) else Color(0xFF2C2C2E)
+    Box(
+        modifier
+            .fillMaxSize()
+            .clip(RoundedCornerShape(14.dp))
+            .background(bg)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(icon, null, tint = Color.White, modifier = Modifier.size(26.dp))
+    }
+}
+
+@Composable
+private fun MediumTile(
+    modifier: Modifier, icon: ImageVector, label: String,
+    active: Boolean, activeColor: Color = Color(0xFF0A84FF), onClick: () -> Unit
+) {
+    val bg = if (active) Color(0xFF2C2C2E) else Color(0xFF1C1C1E)
+    val iconTint = if (active) activeColor else Color.White
+    Column(
+        modifier
+            .height(72.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(bg)
+            .clickable(onClick = onClick)
+            .padding(10.dp),
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        Icon(icon, null, tint = iconTint, modifier = Modifier.size(24.dp))
+        Text(label, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+@Composable
+private fun IosSlider(value: Float, icon: ImageVector, onValueChange: (Float) -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(44.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color(0xFF1C1C1E))
+            .padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, null, tint = Color.White, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(8.dp))
+        Slider(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = Modifier.weight(1f).height(28.dp),
+            colors = SliderDefaults.colors(
+                thumbColor = Color.White,
+                activeTrackColor = Color.White,
+                inactiveTrackColor = Color(0xFF3A3A3C)
+            )
+        )
+    }
+}
+
+@Composable
+private fun MusicCard(modifier: Modifier, audio: AudioManager) {
+    // Try to show currently playing info via MediaMetadata
+    Surface(modifier, color = Color(0xFF1C1C1E), shape = RoundedCornerShape(20.dp)) {
+        Column(
+            Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("Music", color = Color(0xFF8E8E93), fontSize = 11.sp)
+            Spacer(Modifier.height(4.dp))
+            Text("Now Playing", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                maxLines = 1)
+            Spacer(Modifier.weight(1f))
+            // Controls
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = { audio.dispatchMediaKeyEvent(
+                    android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS)) },
+                    modifier = Modifier.size(36.dp)
+                ) { Icon(Icons.Rounded.SkipPrevious, null, tint = Color.White, modifier = Modifier.size(22.dp)) }
+
+                IconButton(onClick = { audio.dispatchMediaKeyEvent(
+                    android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)) },
+                    modifier = Modifier.size(40.dp)
+                ) { Icon(Icons.Rounded.PlayArrow, null, tint = Color.White, modifier = Modifier.size(28.dp)) }
+
+                IconButton(onClick = { audio.dispatchMediaKeyEvent(
+                    android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_MEDIA_NEXT)) },
+                    modifier = Modifier.size(36.dp)
+                ) { Icon(Icons.Rounded.SkipNext, null, tint = Color.White, modifier = Modifier.size(22.dp)) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PhoneTiles(context: Context, flashOn: Boolean, onFlash: () -> Unit) {
+    // Read actual QS tiles from the phone and show known ones
+    val tiles = remember {
+        try {
+            Settings.Secure.getString(context.contentResolver, "sysui_qs_tiles")
+                ?.split(",")?.map { it.trim() } ?: emptyList()
+        } catch (_: Exception) { emptyList() }
+    }
+
+    val shown = mutableListOf<Pair<String, ImageVector>>()
+    fun hasOrDefault(id: String, icon: ImageVector, label: String): Triple<String, String, ImageVector> =
+        Triple(label, id, icon)
+
+    // Map phone tiles to icons
+    tiles.forEach { t ->
+        when {
+            t.contains("flashlight", true) -> shown.add("Torch" to Icons.Rounded.Flashlight)
+            t.contains("calculator", true) -> shown.add("Calc" to Icons.Rounded.Calculate)
+            t.contains("camera", true)     -> shown.add("Camera" to Icons.Rounded.CameraAlt)
+            t.contains("record", true)     -> shown.add("Record" to Icons.Rounded.FiberSmartRecord)
+            t.contains("hotspot", true)    -> shown.add("Hotspot" to Icons.Rounded.WifiTethering)
+            t.contains("location", true)   -> shown.add("Location" to Icons.Rounded.LocationOn)
+            t.contains("battery", true)    -> shown.add("Battery" to Icons.Rounded.BatterySaver)
+            t.contains("nfc", true)        -> shown.add("NFC" to Icons.Rounded.Nfc)
+            t.contains("dark", true)       -> shown.add("Dark" to Icons.Rounded.DarkMode)
+            t.contains("alarm", true)      -> shown.add("Alarm" to Icons.Rounded.Alarm)
+        }
+    }
+    // Always show at least these if list is short
+    if (shown.size < 4) {
+        if (shown.none { it.first == "Torch" })   shown.add("Torch" to Icons.Rounded.Flashlight)
+        if (shown.none { it.first == "Camera" })  shown.add("Camera" to Icons.Rounded.CameraAlt)
+        if (shown.none { it.first == "Hotspot" }) shown.add("Hotspot" to Icons.Rounded.WifiTethering)
+        if (shown.none { it.first == "Alarm" })   shown.add("Alarm" to Icons.Rounded.Alarm)
+    }
+    val displayTiles = shown.take(8)
+
+    val cols = 4
+    val rows = (displayTiles.size + cols - 1) / cols
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        repeat(rows) { row ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                repeat(cols) { col ->
+                    val idx = row * cols + col
+                    if (idx < displayTiles.size) {
+                        val (label, icon) = displayTiles[idx]
+                        val isFlash = label == "Torch"
+                        SmallTile(
+                            modifier = Modifier.weight(1f),
+                            icon = icon,
+                            label = label,
+                            active = if (isFlash) flashOn else false,
+                            onClick = if (isFlash) onFlash else {{}}
+                        )
+                    } else {
+                        Spacer(Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SmallTile(modifier: Modifier, icon: ImageVector, label: String, active: Boolean, onClick: () -> Unit) {
+    Column(
+        modifier
+            .height(68.dp)
+            .clip(CircleShape)
+            .background(if (active) Color(0xFF2C2C2E) else Color(0xFF1C1C1E))
+            .clickable(onClick = onClick),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            icon, null,
+            tint = if (active) Color.White else Color(0xFFAEAEB2),
+            modifier = Modifier.size(26.dp)
+        )
+        Text(label, color = Color(0xFFAEAEB2), fontSize = 10.sp)
     }
 }
