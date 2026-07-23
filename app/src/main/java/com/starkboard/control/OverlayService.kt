@@ -1,57 +1,94 @@
 package com.starkboard.control
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
-import android.content.Context
-import android.content.Intent
+import android.app.*
+import android.content.*
 import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
+import android.provider.Settings
 import android.view.*
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
-import com.starkboard.control.ui.ControlCenterView
-import com.starkboard.control.ui.StatusBarView
-import com.starkboard.control.ui.TriggerPillView
+import androidx.savedstate.SavedStateRegistry
+import androidx.savedstate.SavedStateRegistryController
+import androidx.savedstate.SavedStateRegistryOwner
+import com.starkboard.control.model.NotificationItem
+import com.starkboard.control.ui.*
 
-class OverlayService : LifecycleService() {
+class OverlayService : LifecycleService(), SavedStateRegistryOwner {
 
-    private lateinit var windowManager: WindowManager
+    private val ssrc = SavedStateRegistryController.create(this)
+    override val savedStateRegistry: SavedStateRegistry get() = ssrc.savedStateRegistry
+
+    private lateinit var wm: WindowManager
     private var statusBarView: StatusBarView? = null
-    private var triggerPillView: TriggerPillView? = null
-    private var controlCenterView: ControlCenterView? = null
-    private var ccVisible = false
+    private var dynamicIslandView: DynamicIslandView? = null
+    private var leftEdge: EdgeGestureView? = null
+    private var rightEdge: EdgeGestureView? = null
+    private var controlCenter: ControlCenterView? = null
+    private var notifCenter: NotificationCenterView? = null
+    private var scrim: View? = null
 
-    companion object {
-        const val CHANNEL_ID = "stark_control_overlay"
-        const val NOTIF_ID = 1
+    private val notifications = mutableListOf<NotificationItem>()
 
-        fun start(context: Context) {
-            context.startForegroundService(Intent(context, OverlayService::class.java))
-        }
-        fun stop(context: Context) {
-            context.stopService(Intent(context, OverlayService::class.java))
+    private val notifReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context, intent: Intent) {
+            when (intent.action) {
+                StarkNotificationListenerService.ACTION_NOTIF_POSTED -> {
+                    val item: NotificationItem? = if (Build.VERSION.SDK_INT >= 33)
+                        intent.getParcelableExtra(StarkNotificationListenerService.EXTRA_NOTIF, NotificationItem::class.java)
+                    else
+                        @Suppress("DEPRECATION") intent.getParcelableExtra(StarkNotificationListenerService.EXTRA_NOTIF)
+                    item?.let {
+                        notifications.removeAll { n -> n.key == it.key }
+                        notifications.add(0, it)
+                        if (notifications.size > 50) notifications.removeLast()
+                        dynamicIslandView?.showNotification(it)
+                        notifCenter?.updateNotifications(notifications.toList())
+                    }
+                }
+                StarkNotificationListenerService.ACTION_NOTIF_REMOVED -> {
+                    val key = intent.getStringExtra(StarkNotificationListenerService.EXTRA_KEY)
+                    notifications.removeAll { n -> n.key == key }
+                    notifCenter?.updateNotifications(notifications.toList())
+                }
+            }
         }
     }
 
+    companion object {
+        const val CHANNEL_ID = "stark_overlay"
+        const val NOTIF_ID = 1
+        fun start(ctx: Context) = ctx.startForegroundService(Intent(ctx, OverlayService::class.java))
+        fun stop(ctx: Context) = ctx.stopService(Intent(ctx, OverlayService::class.java))
+    }
+
     override fun onCreate() {
+        ssrc.performRestore(null)
         super.onCreate()
-        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-        createNotificationChannel()
+        wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        createChannel()
 
-        // FIX: Android 14+ requires service type in startForeground()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIF_ID, buildNotification(),
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-        } else {
-            startForeground(NOTIF_ID, buildNotification())
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+            startForeground(NOTIF_ID, buildNotif(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        else
+            startForeground(NOTIF_ID, buildNotif())
+
+        val filter = IntentFilter().apply {
+            addAction(StarkNotificationListenerService.ACTION_NOTIF_POSTED)
+            addAction(StarkNotificationListenerService.ACTION_NOTIF_REMOVED)
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+            registerReceiver(notifReceiver, filter, RECEIVER_NOT_EXPORTED)
+        else
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(notifReceiver, filter)
 
-        addStatusBarOverlay()
-        addTriggerPill()
+        hideSystemStatusBar()
+        addStatusBar()
+        addDynamicIsland()
+        addEdgeGestures()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -59,164 +96,191 @@ class OverlayService : LifecycleService() {
         return START_STICKY
     }
 
-    override fun onBind(intent: Intent): IBinder? {
-        super.onBind(intent)
-        return null
-    }
+    override fun onBind(intent: Intent): IBinder? { super.onBind(intent); return null }
 
     override fun onDestroy() {
         super.onDestroy()
-        removeStatusBar()
-        removeTriggerPill()
-        hideControlCenter()
+        try { unregisterReceiver(notifReceiver) } catch (_: Exception) {}
+        restoreSystemStatusBar()
+        listOf(statusBarView, dynamicIslandView, leftEdge, rightEdge)
+            .forEach { v -> v?.let { safeRemove(it) } }
+        closeControlCenter()
+        closeNotificationCenter()
     }
 
-    // ── Status Bar Overlay ────────────────────────────────────────────
+    // ── System Status Bar ─────────────────────────────────────────────
 
-    private fun addStatusBarOverlay() {
-        val sbh = getStatusBarHeight()
-        val view = StatusBarView(this)
-        statusBarView = view
+    private fun hideSystemStatusBar() {
+        try {
+            Settings.Global.putString(contentResolver, "policy_control", "immersive.status=*")
+        } catch (_: SecurityException) { /* needs WRITE_SECURE_SETTINGS via setup.sh */ }
+    }
 
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            sbh,
+    private fun restoreSystemStatusBar() {
+        try { Settings.Global.putString(contentResolver, "policy_control", null) }
+        catch (_: Exception) {}
+    }
+
+    // ── Status Bar ────────────────────────────────────────────────────
+
+    private fun addStatusBar() {
+        val v = StatusBarView(this,
+            onLeftSwipe = { openNotificationCenter() },
+            onRightSwipe = { openControlCenter() }
+        ).also { statusBarView = it }
+
+        wm.addView(v, WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT, sbHeight(),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or  // pass through touches — pill handles them
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = 0; y = 0
-        }
-
-        windowManager.addView(view, params)
+            PixelFormat.OPAQUE
+        ).apply { gravity = Gravity.TOP or Gravity.START })
     }
 
-    private fun removeStatusBar() {
-        statusBarView?.let {
-            try { windowManager.removeView(it) } catch (_: Exception) {}
-            statusBarView = null
-        }
-    }
+    // ── Dynamic Island ────────────────────────────────────────────────
 
-    // ── Trigger Pill (top-right, always visible, opens CC) ───────────
-    // FIX: Android 12+ intercepts swipe-from-top before tiny overlays receive it.
-    // A tappable/swipeable pill at the top-right corner is the reliable trigger.
-
-    private fun addTriggerPill() {
-        val sbh = getStatusBarHeight()
-        val pill = TriggerPillView(this) { showControlCenter() }
-        triggerPillView = pill
-
-        val pillW = dpToPx(56)
-        val pillH = dpToPx(36)
-
-        val params = WindowManager.LayoutParams(
-            pillW,
-            pillH,
+    private fun addDynamicIsland() {
+        val v = DynamicIslandView(this).also { dynamicIslandView = it }
+        val pillW = dp(120)
+        val sw = screenW()
+        wm.addView(v, WindowManager.LayoutParams(
+            pillW, sbHeight(),
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.END
-            x = 0
-            y = sbh - pillH / 2   // sits half in status bar, half below — reachable
-        }
-
-        windowManager.addView(pill, params)
+        ).apply { gravity = Gravity.TOP or Gravity.START; x = (sw - pillW) / 2; y = 0 })
     }
 
-    private fun removeTriggerPill() {
-        triggerPillView?.let {
-            try { windowManager.removeView(it) } catch (_: Exception) {}
-            triggerPillView = null
+    // ── Edge Gestures ─────────────────────────────────────────────────
+
+    private fun addEdgeGestures() {
+        val sbH = sbHeight()
+        val sw = screenW()
+        val stripW = dp(52)
+        val stripH = dp(200)
+
+        leftEdge = EdgeGestureView(this) { openNotificationCenter() }.also { v ->
+            wm.addView(v, WindowManager.LayoutParams(
+                stripW, stripH,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            ).apply { gravity = Gravity.TOP or Gravity.START; x = 0; y = sbH })
+        }
+
+        rightEdge = EdgeGestureView(this) { openControlCenter() }.also { v ->
+            wm.addView(v, WindowManager.LayoutParams(
+                stripW, stripH,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            ).apply { gravity = Gravity.TOP or Gravity.END; x = 0; y = sbH })
         }
     }
 
-    // ── Control Center Overlay ────────────────────────────────────────
+    // ── Control Center ────────────────────────────────────────────────
 
-    fun showControlCenter() {
-        if (ccVisible) return
-        ccVisible = true
-
-        val cc = ControlCenterView(this) { hideControlCenter() }
-        controlCenterView = cc
-
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+    private fun openControlCenter() {
+        if (controlCenter != null) return
+        closeNotificationCenter()
+        addScrim { closeControlCenter() }
+        val v = ControlCenterView(this, this) { closeControlCenter() }.also { controlCenter = it }
+        wm.addView(v, fullScreenParams(
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-        }
-
-        windowManager.addView(cc, params)
-        // FIX: wait for layout so height != 0 before animating
-        cc.viewTreeObserver.addOnGlobalLayoutListener(object :
-            ViewTreeObserver.OnGlobalLayoutListener {
-            override fun onGlobalLayout() {
-                cc.viewTreeObserver.removeOnGlobalLayoutListener(this)
-                cc.animateIn()
-            }
-        })
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+        ))
+        v.animateIn()
     }
 
-    fun hideControlCenter() {
-        controlCenterView?.let {
-            try { windowManager.removeView(it) } catch (_: Exception) {}
-            controlCenterView = null
-        }
-        ccVisible = false
-        statusBarView?.refreshNetwork()
+    private fun closeControlCenter() {
+        controlCenter?.animateOut { safeRemove(controlCenter); controlCenter = null }
+        removeScrim()
+    }
+
+    // ── Notification Center ───────────────────────────────────────────
+
+    private fun openNotificationCenter() {
+        if (notifCenter != null) return
+        closeControlCenter()
+        addScrim { closeNotificationCenter() }
+        val v = NotificationCenterView(this, this, notifications.toList()) { closeNotificationCenter() }
+            .also { notifCenter = it }
+        wm.addView(v, fullScreenParams(
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+        ))
+        v.animateIn()
+    }
+
+    private fun closeNotificationCenter() {
+        notifCenter?.animateOut { safeRemove(notifCenter); notifCenter = null }
+        removeScrim()
+    }
+
+    // ── Scrim ─────────────────────────────────────────────────────────
+
+    private fun addScrim(onTap: () -> Unit) {
+        val v = View(this).apply {
+            setBackgroundColor(android.graphics.Color.TRANSPARENT)
+            setOnClickListener { onTap() }
+        }.also { scrim = it }
+        wm.addView(v, fullScreenParams(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE))
+    }
+
+    private fun removeScrim() {
+        scrim?.let { safeRemove(it); scrim = null }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────
 
-    private fun getStatusBarHeight(): Int {
-        val resId = resources.getIdentifier("status_bar_height", "dimen", "android")
-        return if (resId > 0) resources.getDimensionPixelSize(resId) else dpToPx(44)
+    private fun safeRemove(v: View?) {
+        v ?: return
+        try { wm.removeView(v) } catch (_: Exception) {}
     }
 
-    private fun dpToPx(dp: Int): Int =
-        (dp * resources.displayMetrics.density + 0.5f).toInt()
+    private fun fullScreenParams(flags: Int) = WindowManager.LayoutParams(
+        WindowManager.LayoutParams.MATCH_PARENT,
+        WindowManager.LayoutParams.MATCH_PARENT,
+        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+        flags, PixelFormat.TRANSLUCENT
+    )
 
-    private fun createNotificationChannel() {
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            getString(R.string.notif_channel),
-            NotificationManager.IMPORTANCE_LOW
-        ).apply {
-            description = getString(R.string.notif_channel_desc)
-            setShowBadge(false)
-        }
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.createNotificationChannel(channel)
+    fun sbHeight(): Int {
+        val id = resources.getIdentifier("status_bar_height", "dimen", "android")
+        return if (id > 0) resources.getDimensionPixelSize(id) else dp(28)
     }
 
-    private fun buildNotification(): Notification {
-        val openIntent = PendingIntent.getActivity(
-            this, 0,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE
-        )
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(getString(R.string.overlay_running))
-            .setContentText(getString(R.string.overlay_stop))
-            .setSmallIcon(android.R.drawable.ic_menu_manage)
-            .setContentIntent(openIntent)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
+    private fun screenW(): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
+        (getSystemService(WINDOW_SERVICE) as WindowManager).currentWindowMetrics.bounds.width()
+    else {
+        val dm = android.util.DisplayMetrics()
+        @Suppress("DEPRECATION")
+        (getSystemService(WINDOW_SERVICE) as WindowManager).defaultDisplay.getRealMetrics(dm)
+        dm.widthPixels
     }
+
+    fun dp(v: Int) = (v * resources.displayMetrics.density + 0.5f).toInt()
+
+    private fun createChannel() {
+        val ch = NotificationChannel(CHANNEL_ID, "Stark Control", NotificationManager.IMPORTANCE_LOW)
+            .apply { setShowBadge(false) }
+        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(ch)
+    }
+
+    private fun buildNotif() = NotificationCompat.Builder(this, CHANNEL_ID)
+        .setContentTitle("Stark Control active")
+        .setContentText("Swipe top-left: notifications • top-right: controls")
+        .setSmallIcon(android.R.drawable.ic_menu_manage)
+        .setOngoing(true)
+        .setPriority(NotificationCompat.PRIORITY_MIN)
+        .build()
 }
