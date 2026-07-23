@@ -1,27 +1,29 @@
 package com.starkboard.control.ui
 
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
+import android.content.*
 import android.graphics.*
 import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import android.os.Handler
 import android.os.Looper
 import android.telephony.TelephonyManager
+import android.view.GestureDetector
+import android.view.MotionEvent
 import android.view.View
 import java.text.SimpleDateFormat
 import java.util.*
 
 /**
- * iPhone 16-style status bar overlay.
- * Left side: time (bold). Right side: signal bars, wifi arcs, battery.
- * Center: Dynamic Island pill (purely cosmetic — matches the iPhone 16 notch shape).
+ * iPhone 16-style status bar.
+ * Left: time | Center: Dynamic Island pill | Right: signal + wifi + battery-bar-with-%-inside
+ * Handles left/right swipe gestures to open notification / control center.
  */
-class StatusBarView(context: Context) : View(context) {
+class StatusBarView(
+    context: Context,
+    private val onLeftSwipe: () -> Unit,
+    private val onRightSwipe: () -> Unit
+) : View(context) {
 
-    // ── Paints ────────────────────────────────────────────────────────
     private val timePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         textAlign = Paint.Align.LEFT
@@ -30,205 +32,242 @@ class StatusBarView(context: Context) : View(context) {
     private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         style = Paint.Style.FILL
+        strokeCap = Paint.Cap.ROUND
     }
     private val islandPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.BLACK
     }
     private val battBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 2f
+        color = Color.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = 1.8f
     }
-    private val battFillPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val battFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val battTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.BLACK
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.create("sans-serif", Typeface.BOLD)
+    }
 
-    private val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
+    private val timeFormat = SimpleDateFormat("h:mm", Locale.getDefault())
     private val handler = Handler(Looper.getMainLooper())
-
     private var batteryLevel = 100
     private var isCharging = false
-    private var wifiLevel = -1   // 0-3 bars, -1 = off/disconnected
-    private var cellLevel = -1   // 0-4 bars, -1 = no service
-    private var cellType = "5G"
+    private var wifiLevel = -1   // -1=off, 0-3 bars
+    private var cellLevel = 2    // 0-4
+
+    private val gestureDetector = GestureDetector(context,
+        object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(e: MotionEvent) = true
+            override fun onFling(e1: MotionEvent?, e2: MotionEvent, vx: Float, vy: Float): Boolean {
+                if (e1 == null) return false
+                val dx = e2.x - e1.x
+                val dy = e2.y - e1.y
+                if (Math.abs(dy) > Math.abs(dx) && vy > 300f) {
+                    // Swipe down — pick left or right half
+                    if (e1.x < width / 2f) onLeftSwipe() else onRightSwipe()
+                    return true
+                }
+                return false
+            }
+        })
 
     private val tickRunnable = object : Runnable {
         override fun run() {
-            updateNetworkStatus()
+            updateNetwork()
             invalidate()
             handler.postDelayed(this, 30_000)
         }
     }
 
-    private val batteryReceiver = object : BroadcastReceiver() {
+    private val battReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
             batteryLevel = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, 100)
             val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
             isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
-                         status == BatteryManager.BATTERY_STATUS_FULL
+                    status == BatteryManager.BATTERY_STATUS_FULL
             invalidate()
         }
     }
 
-    init { setBackgroundColor(Color.BLACK) }
+    init {
+        setBackgroundColor(Color.BLACK)
+        setWillNotDraw(false)
+    }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        context.registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        context.registerReceiver(battReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         handler.post(tickRunnable)
-        updateNetworkStatus()
+        updateNetwork()
     }
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
-        try { context.unregisterReceiver(batteryReceiver) } catch (_: Exception) {}
+        try { context.unregisterReceiver(battReceiver) } catch (_: Exception) {}
         handler.removeCallbacks(tickRunnable)
     }
 
-    fun refreshNetwork() { updateNetworkStatus(); invalidate() }
+    fun refreshNetwork() { updateNetwork(); invalidate() }
 
-    private fun updateNetworkStatus() {
+    private fun updateNetwork() {
         try {
             val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
             wifiLevel = if (wm.isWifiEnabled) {
                 val info = wm.connectionInfo
                 if (info != null && info.networkId != -1)
                     WifiManager.calculateSignalLevel(info.rssi, 4).coerceIn(1, 3)
-                else -1
+                else 0
             } else -1
         } catch (_: Exception) { wifiLevel = -1 }
-
         try {
             val tm = context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
             @Suppress("DEPRECATION")
-            val sig = tm.signalStrength
-            cellLevel = sig?.level ?: 0
-            cellType = when (tm.dataNetworkType) {
-                TelephonyManager.NETWORK_TYPE_NR -> "5G"
-                TelephonyManager.NETWORK_TYPE_LTE -> "LTE"
-                TelephonyManager.NETWORK_TYPE_HSPAP,
-                TelephonyManager.NETWORK_TYPE_HSPA -> "4G"
-                TelephonyManager.NETWORK_TYPE_UMTS,
-                TelephonyManager.NETWORK_TYPE_HSDPA -> "3G"
-                else -> ""
-            }
-        } catch (_: Exception) { cellLevel = 0; cellType = "" }
+            cellLevel = tm.signalStrength?.level ?: 2
+        } catch (_: Exception) { cellLevel = 2 }
     }
+
+    override fun onTouchEvent(event: MotionEvent) = gestureDetector.onTouchEvent(event)
 
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
+        val d = resources.displayMetrics.density
+        val pad = 14f * d       // left/right padding
+        val midY = h / 2f
 
-        // ── Dynamic Island pill (center) ───────────────────────────────
-        val islandW = w * 0.28f
-        val islandH = h * 0.72f
-        val islandR = islandH / 2f
-        val islandLeft = (w - islandW) / 2f
-        val islandTop = (h - islandH) / 2f
+        // ── Time (left) ───────────────────────────────────────────────
+        val timeStr = timeFormat.format(Date())
+        timePaint.textSize = h * 0.52f
+        val timeY = midY + timePaint.textSize * 0.36f
+        canvas.drawText(timeStr, pad, timeY, timePaint)
+
+        // ── Dynamic Island pill (center) ──────────────────────────────
+        val pillW = w * 0.28f
+        val pillH = h * 0.72f
+        val pillLeft = (w - pillW) / 2f
+        val pillTop = (h - pillH) / 2f
         canvas.drawRoundRect(
-            RectF(islandLeft, islandTop, islandLeft + islandW, islandTop + islandH),
-            islandR, islandR, islandPaint
+            RectF(pillLeft, pillTop, pillLeft + pillW, pillTop + pillH),
+            pillH / 2f, pillH / 2f, islandPaint
         )
 
-        val padding = w * 0.04f
-        val iconH = h * 0.55f
-        val iconY = (h - iconH) / 2f + iconH  // baseline
+        // ── Right-side icons ──────────────────────────────────────────
+        val rightPad = pad
+        var rx = w - rightPad
 
-        // ── Time (left side) ──────────────────────────────────────────
-        timePaint.textSize = h * 0.52f
-        val timeStr = timeFormat.format(Date())
-        val timeX = padding + w * 0.02f
-        canvas.drawText(timeStr, timeX, iconY, timePaint)
+        // Battery bar (rightmost)
+        val battW = 28f * d
+        val battH = 14f * d
+        val nubW = 2.5f * d
+        val nubH = 6f * d
+        val battTop = midY - battH / 2f
+        val battLeft = rx - battW - nubW
+        val cornerR = 3.5f * d
 
-        // ── Right-side indicators (battery → wifi → cell → network type) ─
-        var rightX = w - padding
+        // Nub (positive terminal)
+        val nubTop = midY - nubH / 2f
+        canvas.drawRoundRect(
+            RectF(battLeft + battW, nubTop, battLeft + battW + nubW, nubTop + nubH),
+            1.5f * d, 1.5f * d, battBorderPaint
+        )
 
-        // Battery
-        rightX = drawBattery(canvas, rightX, h) - w * 0.025f
-
-        // WiFi
-        if (wifiLevel >= 0) {
-            rightX = drawWifi(canvas, rightX, h, wifiLevel) - w * 0.018f
-        }
-
-        // Cell bars + type label
-        if (cellType.isNotEmpty()) {
-            val typePaint = Paint(timePaint).apply {
-                textSize = h * 0.36f
-                textAlign = Paint.Align.RIGHT
-                color = Color.WHITE
-            }
-            canvas.drawText(cellType, rightX, iconY, typePaint)
-            rightX -= timePaint.measureText(cellType) * 0.36f / 0.52f + w * 0.01f
-        }
-        drawCellBars(canvas, rightX, h, cellLevel.coerceAtLeast(0))
-    }
-
-    /** Returns new rightX after drawing battery. */
-    private fun drawBattery(canvas: Canvas, rightX: Float, h: Float): Float {
-        val bW = h * 1.05f
-        val bH = h * 0.45f
-        val tipW = h * 0.06f
-        val tipH = h * 0.22f
-        val left = rightX - bW - tipW
-        val top = (h - bH) / 2f
-        val r = bH * 0.25f
-
-        // Border
-        canvas.drawRoundRect(RectF(left, top, left + bW, top + bH), r, r, battBorderPaint)
-
-        // Tip
-        val tipLeft = left + bW + 1f
-        val tipTop = (h - tipH) / 2f
-        canvas.drawRoundRect(RectF(tipLeft, tipTop, tipLeft + tipW, tipTop + tipH), 2f, 2f, battBorderPaint)
+        // Outline
+        battBorderPaint.strokeWidth = 1.8f
+        canvas.drawRoundRect(
+            RectF(battLeft, battTop, battLeft + battW, battTop + battH),
+            cornerR, cornerR, battBorderPaint
+        )
 
         // Fill
+        val border = 2.5f * d
+        val maxFillW = battW - border * 2
+        val fillW = maxFillW * (batteryLevel / 100f)
         battFillPaint.color = when {
-            isCharging -> Color.parseColor("#30D158")
-            batteryLevel <= 20 -> Color.RED
+            isCharging -> Color.parseColor("#32D74B")
+            batteryLevel <= 20 -> Color.parseColor("#FF453A")
+            batteryLevel <= 40 -> Color.parseColor("#FF9F0A")
             else -> Color.WHITE
         }
-        val fillW = ((bW - 4f) * batteryLevel / 100f).coerceAtLeast(0f)
-        if (fillW > 0)
-            canvas.drawRoundRect(RectF(left + 2f, top + 2f, left + 2f + fillW, top + bH - 2f),
-                r * 0.6f, r * 0.6f, battFillPaint)
+        if (fillW > cornerR) {
+            canvas.drawRoundRect(
+                RectF(battLeft + border, battTop + border,
+                    battLeft + border + fillW, battTop + battH - border),
+                cornerR - border, cornerR - border, battFillPaint
+            )
+        }
 
-        return left
+        // Percentage text inside battery
+        battTextPaint.textSize = battH * 0.62f
+        battTextPaint.color = if (batteryLevel > 30) Color.BLACK else Color.WHITE
+        canvas.drawText(
+            "$batteryLevel",
+            battLeft + battW / 2f,
+            battTop + battH / 2f + battTextPaint.textSize * 0.36f,
+            battTextPaint
+        )
+
+        rx = battLeft - 8f * d
+
+        // WiFi icon
+        if (wifiLevel >= 0) {
+            rx = drawWifi(canvas, rx, midY, h * 0.42f, d, wifiLevel)
+            rx -= 6f * d
+        }
+
+        // Signal bars (cell)
+        rx = drawSignalBars(canvas, rx, midY, h * 0.46f, d, cellLevel)
     }
 
-    /** Returns new rightX after drawing wifi icon. */
-    private fun drawWifi(canvas: Canvas, rightX: Float, h: Float, level: Int): Float {
-        val size = h * 0.85f
-        val left = rightX - size
-        val top = (h - size) / 2f
-        val cx = left + size / 2f
-        val cy = top + size - size * 0.1f
-
-        val p = Paint(iconPaint).apply {
-            strokeWidth = size * 0.12f; style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND
-        }
-        val steps = 3
-        for (i in 0 until steps) {
-            val rad = size * 0.18f + i * size * 0.24f
-            val arc = RectF(cx - rad, cy - rad, cx + rad, cy + rad)
-            p.alpha = if (i < level) 255 else 70
-            canvas.drawArc(arc, 210f, 120f, false, p)
-        }
-        val dotP = Paint(iconPaint).apply { alpha = 255 }
-        canvas.drawCircle(cx, cy, size * 0.08f, dotP)
-        return left
-    }
-
-    private fun drawCellBars(canvas: Canvas, rightX: Float, h: Float, level: Int) {
+    /** Draws 4 rising bars for cellular signal. Returns new left edge. */
+    private fun drawSignalBars(canvas: Canvas, rightX: Float, midY: Float, totalH: Float, d: Float, level: Int): Float {
         val barCount = 4
-        val barW = h * 0.13f
-        val spacing = h * 0.08f
-        val maxH = h * 0.52f
-        val totalW = barCount * barW + (barCount - 1) * spacing
-        val left = rightX - totalW
-        val bottom = (h + maxH) / 2f
+        val barW = 3f * d
+        val gap = 2f * d
+        val totalW = barCount * barW + (barCount - 1) * gap
+        val baseY = midY + totalH / 2f
 
-        for (i in 0 until barCount) {
-            val barH = maxH * (i + 1) / barCount
-            val bx = left + i * (barW + spacing)
-            val p = Paint(iconPaint).apply { alpha = if (i < level) 255 else 70 }
-            canvas.drawRoundRect(RectF(bx, bottom - barH, bx + barW, bottom), 1.5f, 1.5f, p)
+        val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
         }
+        for (i in 0 until barCount) {
+            val barH = totalH * ((i + 1).toFloat() / barCount)
+            val left = rightX - totalW + i * (barW + gap)
+            p.color = if (i < level) Color.WHITE else Color.argb(80, 255, 255, 255)
+            canvas.drawRoundRect(
+                RectF(left, baseY - barH, left + barW, baseY),
+                1.5f * d, 1.5f * d, p
+            )
+        }
+        return rightX - totalW - 0f
+    }
+
+    /** Draws iOS-style WiFi arcs. Returns new left edge. */
+    private fun drawWifi(canvas: Canvas, rightX: Float, midY: Float, size: Float, d: Float, level: Int): Float {
+        val cx = rightX - size / 2f
+        val baseY = midY + size * 0.3f
+        val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+        }
+        // 3 arcs + dot
+        val arcCount = 3
+        for (i in 0 until arcCount) {
+            val r = size * (i + 1) / (arcCount + 1)
+            p.strokeWidth = 1.8f * d
+            p.color = if ((arcCount - i) <= level) Color.WHITE else Color.argb(80, 255, 255, 255)
+            canvas.drawArc(
+                RectF(cx - r, baseY - r, cx + r, baseY + r),
+                200f, 140f, false, p
+            )
+        }
+        // Dot
+        val dotR = 2f * d
+        p.style = Paint.Style.FILL
+        p.color = if (level > 0) Color.WHITE else Color.argb(80, 255, 255, 255)
+        canvas.drawCircle(cx, baseY + dotR * 0.5f, dotR, p)
+        return rightX - size
     }
 }
