@@ -26,6 +26,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
 import androidx.lifecycle.*
 import androidx.savedstate.SavedStateRegistryOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.starkboard.control.model.NotificationItem
 import com.starkboard.control.toggles.FlashlightToggle
 import kotlin.math.roundToInt
