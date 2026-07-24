@@ -109,8 +109,11 @@ private fun ControlCenterContent(context: Context, onClose: () -> Unit) {
     }
     var volume by remember {
         mutableFloatStateOf(
-            audio.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() /
-            audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).toFloat()
+            try {
+                val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                if (max <= 0) 0.5f
+                else audio.getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / max.toFloat()
+            } catch (_: Exception) { 0.5f }
         )
     }
 
