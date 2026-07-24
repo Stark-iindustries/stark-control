@@ -5,10 +5,12 @@ import android.content.Context
 
 object DndToggle {
     fun isEnabled(context: Context): Boolean {
-        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        return nm.currentInterruptionFilter == NotificationManager.INTERRUPTION_FILTER_NONE ||
-               nm.currentInterruptionFilter == NotificationManager.INTERRUPTION_FILTER_PRIORITY ||
-               nm.currentInterruptionFilter == NotificationManager.INTERRUPTION_FILTER_ALARMS
+        return try {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.currentInterruptionFilter == NotificationManager.INTERRUPTION_FILTER_NONE ||
+                   nm.currentInterruptionFilter == NotificationManager.INTERRUPTION_FILTER_PRIORITY ||
+                   nm.currentInterruptionFilter == NotificationManager.INTERRUPTION_FILTER_ALARMS
+        } catch (_: Exception) { false }
     }
 
     fun toggle(context: Context): Boolean {
