@@ -9,8 +9,10 @@ object BluetoothToggle {
     private fun adapter(context: Context): BluetoothAdapter? =
         (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
 
-    fun isEnabled(context: Context): Boolean =
+    @Suppress("MissingPermission")
+    fun isEnabled(context: Context): Boolean = try {
         adapter(context)?.isEnabled == true
+    } catch (_: Exception) { false }
 
     @Suppress("DEPRECATION", "MissingPermission")
     fun toggle(context: Context): Boolean {
