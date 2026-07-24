@@ -25,6 +25,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
 import androidx.lifecycle.*
+import androidx.lifecycle.ViewModelStoreOwner
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.starkboard.control.model.NotificationItem
@@ -51,6 +52,9 @@ class NotificationCenterView(
             this.setViewTreeLifecycleOwner(lifecycleOwner)
             if (lifecycleOwner is SavedStateRegistryOwner) {
                 this.setViewTreeSavedStateRegistryOwner(lifecycleOwner)
+            }
+            if (lifecycleOwner is ViewModelStoreOwner) {
+                this.setViewTreeViewModelStoreOwner(lifecycleOwner)
             }
             setContent {
                 MaterialTheme(colorScheme = darkColorScheme()) {
