@@ -10,13 +10,18 @@ import android.provider.Settings
 import android.view.*
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.LifecycleService
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
 import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import com.starkboard.control.model.NotificationItem
 import com.starkboard.control.ui.*
 
-class OverlayService : LifecycleService(), SavedStateRegistryOwner {
+class OverlayService : LifecycleService(), SavedStateRegistryOwner, ViewModelStoreOwner {
+
+    private val vmStore = ViewModelStore()
+    override val viewModelStore: ViewModelStore get() = vmStore
 
     private val ssrc = SavedStateRegistryController.create(this)
     override val savedStateRegistry: SavedStateRegistry get() = ssrc.savedStateRegistry
@@ -99,6 +104,7 @@ class OverlayService : LifecycleService(), SavedStateRegistryOwner {
     override fun onBind(intent: Intent): IBinder? { super.onBind(intent); return null }
 
     override fun onDestroy() {
+        vmStore.clear()
         super.onDestroy()
         try { unregisterReceiver(notifReceiver) } catch (_: Exception) {}
         restoreSystemStatusBar()
@@ -226,14 +232,19 @@ class OverlayService : LifecycleService(), SavedStateRegistryOwner {
 
     private fun openControlCenter() {
         if (controlCenter != null) return
-        closeNotificationCenter()
-        addScrim { closeControlCenter() }
-        val v = ControlCenterView(this, this) { closeControlCenter() }.also { controlCenter = it }
-        wm.addView(v, fullScreenParams(
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-        ))
-        v.animateIn()
+        try {
+            closeNotificationCenter()
+            addScrim { closeControlCenter() }
+            val v = ControlCenterView(this, this) { closeControlCenter() }.also { controlCenter = it }
+            wm.addView(v, fullScreenParams(
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+            ))
+            v.animateIn()
+        } catch (_: Exception) {
+            controlCenter = null
+            removeScrim()
+        }
     }
 
     private fun closeControlCenter() {
@@ -245,15 +256,20 @@ class OverlayService : LifecycleService(), SavedStateRegistryOwner {
 
     private fun openNotificationCenter() {
         if (notifCenter != null) return
-        closeControlCenter()
-        addScrim { closeNotificationCenter() }
-        val v = NotificationCenterView(this, this, notifications.toList()) { closeNotificationCenter() }
-            .also { notifCenter = it }
-        wm.addView(v, fullScreenParams(
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-        ))
-        v.animateIn()
+        try {
+            closeControlCenter()
+            addScrim { closeNotificationCenter() }
+            val v = NotificationCenterView(this, this, notifications.toList()) { closeNotificationCenter() }
+                .also { notifCenter = it }
+            wm.addView(v, fullScreenParams(
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+            ))
+            v.animateIn()
+        } catch (_: Exception) {
+            notifCenter = null
+            removeScrim()
+        }
     }
 
     private fun closeNotificationCenter() {
